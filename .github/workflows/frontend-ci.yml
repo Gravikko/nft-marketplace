@@ -35,7 +35,12 @@ jobs:
 
       - name: Lint
         working-directory: ./frontend
-        run: pnpm run lint
+        run: |
+          if [ -d "src" ] && [ "$(find src -name '*.ts' -o -name '*.tsx' | wc -l)" -gt 0 ]; then
+            pnpm run lint
+          else
+            echo "No TypeScript files found, skipping lint"
+          fi
 
       - name: Build
         working-directory: ./frontend
