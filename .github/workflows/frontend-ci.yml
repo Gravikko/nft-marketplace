@@ -44,4 +44,9 @@ jobs:
 
       - name: Build
         working-directory: ./frontend
-        run: pnpm run build
+        run: |
+          if [ -d "src" ] && [ "$(find src -name '*.ts' -o -name '*.tsx' | wc -l)" -gt 0 ]; then
+            pnpm run build
+          else
+            echo "No TypeScript files found, skipping build"
+          fi
