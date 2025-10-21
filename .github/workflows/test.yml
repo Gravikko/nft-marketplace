@@ -28,10 +28,13 @@ jobs:
         run: forge --version
 
       - name: Run Forge fmt
+        working-directory: ./contracts
         run: forge fmt --check
 
       - name: Run Forge build
+        working-directory: ./contracts
         run: forge build --sizes
 
       - name: Run Forge tests
+        working-directory: ./contracts
         run: forge test -vvv
