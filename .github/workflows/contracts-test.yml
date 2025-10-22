@@ -15,7 +15,7 @@ jobs:
       - name: Install Foundry
         run: |
           curl -L https://foundry.paradigm.xyz | bash
-          source ~/.bashrc
+          export PATH="$HOME/.foundry/bin:$PATH"
           foundryup
 
       - name: Install dependencies (contracts)
@@ -27,5 +27,5 @@ jobs:
       - name: Run forge tests
         working-directory: ./contracts
         run: |
-          source ~/.bashrc || true
+          export PATH="$HOME/.foundry/bin:$PATH"
           forge test
