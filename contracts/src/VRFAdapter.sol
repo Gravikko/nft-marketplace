@@ -7,8 +7,8 @@ import {Initializable} from "openzeppelin-contracts-upgradeable/proxy/utils/Init
 import {OwnableUpgradeable} from "openzeppelin-contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {UUPSUpgradeable} from "openzeppelin-contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
-import {VRFCoordinatorV2_5Interface} from "@chainlink/contracts/src/v0.8/vrf/interfaces/VRFCoordinatorV2_5Interface.sol";
-import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/libraries/VRFV2PlusClient.sol";
+import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
+import {IVRFCoordinatorV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/interfaces/IVRFCoordinatorV2Plus.sol";
 
 /// @title VRF Adapter for Chainlink VRF v2.5
 /// @notice This contract acts as an intermediary between ERC721Collection and Chainlink VRF
@@ -32,7 +32,7 @@ contract VRFAdapter is
         uint256 tokenId;
     }
 
-    VRFCoordinatorV2_5Interface public s_vrfCoordinator;
+    IVRFCoordinatorV2Plus public s_vrfCoordinator;
     uint256 private _vrfSubscriptionId;
     bytes32 private _vrfKeyHash;
     uint32 private _vrfCallbackGasLimit;
@@ -91,7 +91,7 @@ contract VRFAdapter is
             revert ZeroAddress();
         }
 
-        s_vrfCoordinator = VRFCoordinatorV2_5Interface(vrfCoordinator);
+        s_vrfCoordinator = IVRFCoordinatorV2Plus(vrfCoordinator);
         _vrfSubscriptionId = subscriptionId;
         _vrfKeyHash = keyHash;
         _vrfCallbackGasLimit = callbackGasLimit;
@@ -119,7 +119,7 @@ contract VRFAdapter is
             revert ZeroAddress();
         }
 
-        s_vrfCoordinator = VRFCoordinatorV2_5Interface(vrfCoordinator);
+        s_vrfCoordinator = IVRFCoordinatorV2Plus(vrfCoordinator);
         _vrfSubscriptionId = subscriptionId;
         _vrfKeyHash = keyHash;
         _vrfCallbackGasLimit = callbackGasLimit;

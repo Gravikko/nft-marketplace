@@ -21,6 +21,20 @@ contract Factory is
     Initializable, 
     UUPSUpgradeable
 {
+    struct CreateCollectionParams {
+        string name;
+        string symbol;
+        string revealType;
+        string baseURI;
+        string placeholderURI;
+        address royaltyReceiver;
+        uint96 royaltyFeeNumerator;
+        uint256 maxSupply;
+        uint256 mintPrice;
+        uint256 batchMintSupply;
+    }
+
+
     uint256 private _collectionsIdCounter;
     uint256 public constant MAX_SUPPLY = 20_000;
     address private _marketplace; 
@@ -43,7 +57,7 @@ contract Factory is
         string symbol
     );
     event FactoryIsActive();
-    event FactoryIsStopped();
+    event FactorySetStopped();
     event MultisigTimelockSet(address indexed multisigTimelock);
     event NewMarketplaceAddressSet(address indexed marketplace);
     event VRFAdapterSet(address indexed vrfAdapter);
@@ -82,7 +96,7 @@ contract Factory is
     }    
 
     /**
-     * Initializer
+     * @dev Initializer
      */
     function initialize(address multisigTimelock) external initializer {
         _collectionsIdCounter = 1;
@@ -125,52 +139,49 @@ contract Factory is
         emit BeaconSet(beaconAddress);
     }
 
+    
     function createCollection(
-        string memory name,
-        string memory symbol, 
-        string memory revealType,
-        string memory baseURI,
-        string memory _placeholderURI,
-        address royaltyReceiver,
-        uint96 royaltyFeeNumerator,
-        uint256 maxSupply,
-        uint256 mintPrice,
-        uint256 batchMintSupply
+        CreateCollectionParams calldata params
     ) external returns (uint256 collectionId, address collectionAddress) {
         if (!_isFactoryActive) revert FactoryIsStopped();
         if (_vrfAdapter == address(0)) revert NoVRFAdapterSet();
         if (_beacon == address(0)) revert NoBeaconAddressSet();
         if (_marketplace == address(0)) revert MarketplaceAddressIsNotSet();
-        if (maxSupply > MAX_SUPPLY || maxSupply == 0) revert IncorrectCollectionSupply();
-        if (mintPrice == 0) revert IncorrectMintPrice();
-        if (batchMintSupply > maxSupply) revert IncorrectBatchMintSupply();
-        if (keccak256(bytes(revealType)) != keccak256(bytes("instant")) && 
-            keccak256(bytes(revealType)) != keccak256(bytes("delayed"))) {
+        if (params.maxSupply > MAX_SUPPLY || params.maxSupply == 0) revert IncorrectCollectionSupply();
+        if (params.mintPrice == 0) revert IncorrectMintPrice();
+        if (params.batchMintSupply > params.maxSupply) revert IncorrectBatchMintSupply();
+        bytes32 revealTypeHash = keccak256(bytes(params.revealType));
+        if (revealTypeHash != keccak256(bytes("instant")) && 
+            revealTypeHash != keccak256(bytes("delayed"))) {
             revert IncorrectRevealType();
         }
-        if (royaltyFeeNumerator > 10000) revert IncorrectRoyaltyFee();  // Max 100%
+        if (params.royaltyFeeNumerator > 10000) revert IncorrectRoyaltyFee();  // Max 100%
 
         collectionId = _collectionsIdCounter;
         unchecked {
             _collectionsIdCounter++;
         }
 
-        bytes memory initData = abi.encodeWithSelector(
+        ERC721Collection.InitConfig memory initConfig = ERC721Collection.InitConfig({
+            name: params.name,
+            symbol: params.symbol,
+            revealType: params.revealType,
+            baseURI: params.baseURI,
+            placeholderURI: params.placeholderURI,
+            royaltyReceiver: params.royaltyReceiver,
+            royaltyFeeNumerator: params.royaltyFeeNumerator,
+            maxSupply: params.maxSupply,
+            mintPrice: params.mintPrice,
+            batchMintSupply: params.batchMintSupply,
+            vrfAdapter: _vrfAdapter
+        });
+
+        bytes memory initCalldata = abi.encodeWithSelector(
             ERC721Collection.initialize.selector,
-            name,
-            symbol,
-            revealType,
-            baseURI,
-            _placeholderURI,
-            royaltyReceiver,
-            royaltyFeeNumerator,
-            maxSupply,
-            mintPrice,
-            batchMintSupply,
-            _vrfAdapter
+            initConfig
         );
 
-        BeaconProxy proxy = new BeaconProxy(_beacon, initData);
+        BeaconProxy proxy = new BeaconProxy(_beacon, initCalldata);
         collectionAddress = address(proxy);
 
         userCollections[msg.sender].push(collectionId);
@@ -182,8 +193,8 @@ contract Factory is
             collectionId,
             msg.sender,
             collectionAddress,
-            name,
-            symbol
+            params.name,
+            params.symbol
         );
 
         return (collectionId, collectionAddress);
@@ -206,7 +217,7 @@ contract Factory is
     function stopFactory() external onlyMultisig {
         if (!_isFactoryActive) revert FactoryIsStoppedAlready();
         _isFactoryActive = false;
-        emit FactoryIsStopped();
+        emit FactorySetStopped();
     }
 
 
@@ -218,11 +229,26 @@ contract Factory is
     }
 
     /**
+     * @dev Get MultisigTimelock address
+     */
+    function getMultisigTimelock() external view returns (address) {
+        return _multisigTimelock;
+    }
+
+    /**
      * @dev Check Factory status
      */
     function isFactoryActive() external view returns (bool) {
         return _isFactoryActive;
     }
+
+    /**
+     * @dev Get the current marketplace address
+     */
+    function getMarketplaceAddress() public returns(address) {
+        return _marketplace;
+    }
+
     /**
      * @dev Get collection owner
      */

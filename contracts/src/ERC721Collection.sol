@@ -20,7 +20,6 @@ interface IVRFAdapter {
 /// @title An NFT Creation contract with multiple choices of reveal types
 /// @notice This is an upgradeable ERC721 collection with royalties support
 
-/// @TODO: VRF chainlink 
 /// multisignature + timelock to avoid compromentation (not only in this contract, but in each, factory , marketplace and etc)
 /// beacon proxy
 
@@ -32,6 +31,20 @@ contract ERC721Collection is
     ReentrancyGuard,
     UUPSUpgradeable
 {
+    struct InitConfig {
+        string name;
+        string symbol;
+        string revealType;
+        string baseURI;
+        string placeholderURI;
+        address royaltyReceiver;
+        uint96 royaltyFeeNumerator;
+        uint256 maxSupply;
+        uint256 mintPrice;
+        uint256 batchMintSupply;
+        address vrfAdapter;
+    }
+    
     uint256 public maxSupply;
     uint256 public mintPrice;
     uint256 public batchMintSupply; 
@@ -43,6 +56,7 @@ contract ERC721Collection is
     mapping(uint256 => bool) private _vrfPendingReveals;
     mapping(uint256 => uint256) private _revealedTraitsIndex;
     address private _vrfAdapter;
+    address private _paymentReceiver;
 
     /* Events */
     event BaseURIUpdated(string newBaseURI);
@@ -54,6 +68,7 @@ contract ERC721Collection is
     event VRFRequested(uint256 indexed requestId, uint256 indexed tokenId);
     event VRFRevealCompleted(uint256 indexed tokenId, uint256 indexed traitIndex);
     event Withdrawn(uint256 indexed balance);
+    event PaymentReceiverUpdated(address indexed newPaymentReceiver);
 
     /* Errors */ 
     error IncorrectBatchMintSupply();
@@ -63,9 +78,9 @@ contract ERC721Collection is
     error NoUnrevealedIndexes();
     error NotAnOwner();
     error OnlyVRFAdapter();
-    error TokenAlreadyPendingReveal(uint256 tokenId);
+    error TokenAlreadyPendingReveal();
     error TokenIsNotMinted();
-    error TokenIsRevealedAlready(uint256 tokenId);
+    error TokenIsRevealedAlready();
     error TransferFailed();
     error VRFRequestFailed();
     error VrfAdapterNotSet();
@@ -77,51 +92,46 @@ contract ERC721Collection is
  
     /**
      * @dev Initializes the contract. Called by the proxy
-     * @param name Token collection name
-     * @param symbol Token collection symbol   
-     * @param _revealType Type of reveal (e.g., "instant", "manual")
-     * @param baseURI Base URI for unrevealed tokens
-     * @param _placeholderURI Placeholder URI for unrevealed tokens
-     * @param royaltyReceiver Address to receive royalties
-     * @param royaltyFeeNumerator Fee numerator for royalties (basis points / 10000)
-     * @param _maxSupply Maximum number of tokens
-     * @param _mintPrice Price per mint
-     * @param _batchMintSupply Number of tokens allow for batch mint
+     * @param config Struct containing collection metadata and mint settings
+     * @param config.name Token collection name
+     * @param config.symbol Token collection symbol
+     * @param config.revealType Type of reveal (e.g., "instant", "manual")
+     * @param config.baseURI Base URI for revealed tokens
+     * @param config.placeholderURI Placeholder URI for unrevealed tokens
+     * @param config.royaltyReceiver Address to receive royalties
+     * @param config.royaltyFeeNumerator Fee numerator for royalties (basis points / 10000)
+     * @param config.maxSupply Maximum number of tokens
+     * @param config.mintPrice Price per mint
+     * @param config.batchMintSupply Number of tokens allowed for batch mint
+     * @param config.vrfAdapter Address of the VRF adapter contract
      */
     function initialize(
-        string memory name,
-        string memory symbol, 
-        string memory _revealType,
-        string memory baseURI,
-        string memory _placeholderURI,
-        address royaltyReceiver, 
-        uint96 royaltyFeeNumerator,
-        uint256 _maxSupply,
-        uint256 _mintPrice,
-        uint256 _batchMintSupply,
-        address vrfAdapter
+        InitConfig memory config
     ) external initializer {
-        __ERC721_init(name, symbol);
+        __ERC721_init(config.name, config.symbol);
         __ERC2981_init();
         __Ownable_init(msg.sender);
  
-        revealType = _revealType;
-        _baseTokenURI = baseURI;
-        placeholderURI = _placeholderURI; 
-        maxSupply = _maxSupply;
-        mintPrice = _mintPrice;
-        batchMintSupply = _batchMintSupply;
+        revealType = config.revealType;
+        _baseTokenURI = config.baseURI;
+        placeholderURI = config.placeholderURI; 
+        maxSupply = config.maxSupply;
+        mintPrice = config.mintPrice;
+        batchMintSupply = config.batchMintSupply;
 
-        if (vrfAdapter == address(0)) revert ZeroAddress();
+        if (config.vrfAdapter == address(0)) revert ZeroAddress();
 
-        _vrfAdapter = vrfAdapter;
+        _vrfAdapter = config.vrfAdapter;
 
-        if (batchMintSupply > maxSupply) {
+        if (config.batchMintSupply > config.maxSupply) {
             revert IncorrectBatchMintSupply();
         }
         
         // Set royalty info
-        _setDefaultRoyalty(royaltyReceiver, royaltyFeeNumerator);
+        _setDefaultRoyalty(config.royaltyReceiver, config.royaltyFeeNumerator);
+        
+        // Store payment receiver (creator) for mint payments
+        _paymentReceiver = config.royaltyReceiver;
         
         _nextTokenId = 1;
 
@@ -133,7 +143,7 @@ contract ERC721Collection is
             _nextTokenId = endTokenId;
         }
 
-        emit Initialized(msg.sender, name, symbol);
+        emit Initialized(msg.sender, config.name, config.symbol);
     }
 
 
@@ -143,12 +153,12 @@ contract ERC721Collection is
     function mint() external payable {
         if (_nextTokenId > maxSupply) revert MaxSupplyReached();
         if (msg.value < mintPrice) revert InsufficientBalance();
-        (bool success, ) = payable(owner()).call{value: msg.value}("");
+        (bool success, ) = payable(_paymentReceiver).call{value: msg.value}("");
         if (!success) revert TransferFailed();
         _safeMint(msg.sender, _nextTokenId);
         emit NewMintedToken(_nextTokenId);
 
-        if (revealType == "instant") {
+        if (keccak256(abi.encodePacked(revealType)) == keccak256(abi.encodePacked("instant"))) {
             instantReveal(_nextTokenId);
         }
 
@@ -176,6 +186,15 @@ contract ERC721Collection is
     }
 
     /**
+     * @dev Sets new payment receiver address
+     */
+    function setPaymentReceiver(address newPaymentReceiver) external onlyOwner {
+        if (newPaymentReceiver == address(0)) revert ZeroAddress();
+        _paymentReceiver = newPaymentReceiver;
+        emit PaymentReceiverUpdated(newPaymentReceiver);
+    }
+
+    /**
      * @dev Reveal is processing using VRF Chainlink
      * @param tokenId The token ID to reveal
      */
@@ -185,11 +204,11 @@ contract ERC721Collection is
         }
 
         if (_isRevealed[tokenId]) {
-            revert TokenIsRevealedAlready(tokenId);
+            revert TokenIsRevealedAlready();
         }
 
         if (_vrfPendingReveals[tokenId]) {
-            revert TokenAlreadyPendingReveal(tokenId);
+            revert TokenAlreadyPendingReveal();
         }
 
         if (_vrfAdapter == address(0)) {
@@ -218,19 +237,17 @@ contract ERC721Collection is
             revert OnlyVRFAdapter();
         }
 
+        if (_isRevealed[tokenId]) {
+            revert TokenIsRevealedAlready();
+        }
+
         if (!_vrfPendingReveals[tokenId]) {
             revert InvalidVRFRequest();
         }
 
-        if (_isRevealed[tokenId]) {
-            revert TokenIsRevealedAlready(tokenId);
-        }
-
-        // Use random number to find unrevealed trait index
         uint256 startIndex = (randomNumber % maxSupply) + 1;
         uint256 traitIndex = nextUnrevealedIndex(startIndex);
 
-        // Mark as revealed and set trait index
         _isRevealed[tokenId] = true;
         _revealedTraitsIndex[tokenId] = traitIndex;
         _vrfPendingReveals[tokenId] = false;
@@ -254,7 +271,7 @@ contract ERC721Collection is
         uint256 balance = address(this).balance;
         if (balance == 0) revert InsufficientBalance();
 
-        (bool success, ) = payable(owner()).call{value: balance}("");
+        (bool success, ) = payable(_paymentReceiver).call{value: balance}("");
         if (!success) revert TransferFailed();
 
         emit Withdrawn(balance);
@@ -283,10 +300,12 @@ contract ERC721Collection is
 
     /**
      * @dev Get Default royalty receiver
+     * @notice Uses royaltyInfo with a non-existent tokenId to get default royalty receiver
      */
     function getDefaultRoyaltyReceiver() external view returns(address) {
-        ERC2981Storage storage $ = _getERC2981Storage();
-        return $._defaultRoyaltyInfo.receiver;
+        // Use a tokenId that doesn't exist to get default royalty (type(uint256).max will never be minted)
+        (address receiver, ) = royaltyInfo(type(uint256).max, 10000);
+        return receiver;
     }
 
 
@@ -309,7 +328,7 @@ contract ERC721Collection is
     /**
      * @dev Get remaining supply of available to mint
     */
-    function remainingSupply() external view returns (uint256) {
+    function remainingSupply() public view returns (uint256) {
         return maxSupply - (_nextTokenId - 1);
     }
 
@@ -322,15 +341,53 @@ contract ERC721Collection is
     }
 
     /**
+     * @dev Get Next tokenId to mint
+     */
+    function getNextTokenId() external view returns(uint256) {
+        if (remainingSupply() == 0) revert MaxSupplyReached();
+        return _nextTokenId;
+    }
+
+    /**
+     * @dev Get mint price
+     */
+    function getMintPrice() external view returns (uint256) {
+        return mintPrice;
+    }
+
+    /**
      * @dev Check if token is approved for marketplace
      */
     function isTokenApproved(uint256 tokenId, address _marketplace) external view returns(bool) {
-        address owner = _ownerOf(tokenId);
+        address owner = ownerOf(tokenId);
         return (
-            _tokenApprovals[tokenId] == _marketplace ||
-            _operatorApprovals[owner][_marketplace]
+            getApproved(tokenId) == _marketplace ||
+            isApprovedForAll(owner, _marketplace)
         );
     }
+
+    /**
+     * @dev Get
+     */
+    function getERC721CollectionSettings() external view returns (InitConfig memory config) {
+        config.name = name();
+        config.symbol = symbol();
+        config.revealType = revealType;
+        config.baseURI = _baseTokenURI;
+        config.placeholderURI = placeholderURI;
+        (config.royaltyReceiver, config.royaltyFeeNumerator) = _getDefaultRoyaltyInfo();
+        config.maxSupply = maxSupply;
+        config.mintPrice = mintPrice;
+        config.batchMintSupply = batchMintSupply;
+        config.vrfAdapter = _vrfAdapter;
+    }
+
+    /**
+     * @dev check if current token reveal is pending
+     */
+    function getVrfPendingReveals(uint256 tokenId) external view returns (bool) {
+        return _vrfPendingReveals[tokenId];
+    }   
 
     /**
      * @dev See {IERC165-supportsInterface}
@@ -368,17 +425,13 @@ contract ERC721Collection is
 
     /**
      * @dev Returns royalty info for tokenId
+     * @param tokenId The token ID to get royalty info for
+     * @param salePrice The sale price to calculate royalty amount
+     * @return royaltyAmount The royalty amount in wei
+     * @return royaltyReceiver The address that receives the royalty
      */
-    function getRoyaltyByTokenId(uint256 tokenId) public view returns(uint256 royaltyAmount, address royaltyReceiver) {
-        ERC2981Storage storage $ = _getERC2981Storage();
-        RoyaltyInfo storage _royaltyInfo = $._tokenRoyaltyInfo[tokenId];
-        royaltyReceiver = _royaltyInfo.receiver;
-        royaltyAmount = _royaltyInfo.royaltyFraction;
-
-        if (royaltyReceiver == address(0)) {
-            royaltyReceiver = $._defaultRoyaltyInfo.receiver;
-            royaltyAmount = $._defaultRoyaltyInfo.royaltyFraction;
-        } 
+    function getRoyaltyByTokenId(uint256 tokenId, uint256 salePrice) public view returns(uint256 royaltyAmount, address royaltyReceiver) {
+        (royaltyReceiver, royaltyAmount) = royaltyInfo(tokenId, salePrice);
     }
 
     /**
@@ -411,10 +464,9 @@ contract ERC721Collection is
     }
 
     /**
-     * @dev Generates pseudo-random number for instant reveal
+     * @dev Generates pseudo-random number for (instant) reveal
      * @notice This is not cryptographically secure and can be manipulated by miners/validators
      * @param tokenId The token ID being revealed
-     * @return A pseudo-random trait index (1 to maxSupply)
      */
     function instantReveal(uint256 tokenId) internal {
         uint256 randomSeed = uint256(keccak256(abi.encodePacked(
@@ -466,5 +518,15 @@ contract ERC721Collection is
      */
     function _baseURI() internal view override returns (string memory) {
         return _baseTokenURI;
+    }
+
+    /**
+     * @dev Helper to read the default royalty receiver and fee numerator
+     */
+    function _getDefaultRoyaltyInfo() internal view returns (address receiver, uint96 feeNumerator) {
+        uint256 salePrice = _feeDenominator();
+        uint256 royaltyAmount;
+        (receiver, royaltyAmount) = royaltyInfo(type(uint256).max, salePrice);
+        feeNumerator = uint96(royaltyAmount);
     }
 }

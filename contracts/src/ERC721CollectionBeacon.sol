@@ -18,8 +18,8 @@ contract ERC721CollectionBeacon is
     event Upgraded(address indexed implementation);
 
     /* Errors */
-    error BeaconInvalidImplementation(address indexed implementation);
-    error MultisigTimelockInvalidImplementation(address indexed newMultisigTimelock);
+    error BeaconInvalidImplementation();
+    error MultisigTimelockInvalidImplementation();
     error NotMultisigTimelock();
     error ZeroAddress();
 
@@ -39,7 +39,7 @@ contract ERC721CollectionBeacon is
     constructor (address implementation_, address multisigTimelock) {
         if (implementation_ == address(0)) revert ZeroAddress();
         if (multisigTimelock == address(0)) revert ZeroAddress();
-        if (implementation_.code.length == 0) revert BeaconInvalidImplementation(implementation_);
+        if (implementation_.code.length == 0) revert BeaconInvalidImplementation();
 
         _implementation = implementation_;
         _multisigTimelock = multisigTimelock;
@@ -56,8 +56,8 @@ contract ERC721CollectionBeacon is
      * - `newImplementation` must be a contract.
      */
     function upgradeTo(address newImplementation) external virtual onlyMultisig {
-        if (newImplementation.code.length == 0) revert BeaconInvalidImplementation(newImplementation);
         if (newImplementation == address(0)) revert ZeroAddress();
+        if (newImplementation.code.length == 0) revert BeaconInvalidImplementation();
         _implementation = newImplementation;
         emit Upgraded(newImplementation);
     }
@@ -66,8 +66,8 @@ contract ERC721CollectionBeacon is
      * @dev Upgrades multisigTimelock address
      */
     function setMultisigTimelock(address newMultisigTimelock) external virtual onlyMultisig {
-        if (newMultisigTimelock.code.length == 0) revert MultisigTimelockInvalidImplementation(newMultisigTimelock);
         if (newMultisigTimelock == address(0)) revert ZeroAddress();
+        if (newMultisigTimelock.code.length == 0) revert MultisigTimelockInvalidImplementation();
         _multisigTimelock = newMultisigTimelock;
         emit MultisigTimelockSet(newMultisigTimelock);
     }

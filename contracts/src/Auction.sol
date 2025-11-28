@@ -45,7 +45,7 @@ contract Auction is
     uint256 immutable private MIN_PRICE = 1000 wei;
     uint256 immutable private PERCENT_DIVISOR = 100;
     uint256 immutable private FEE_DENOMINATOR = 10_000;
-    uint256 private EXTENSION_TIME = 5 minutes;
+    uint256 immutable private EXTENSION_TIME = 5 minutes;
     uint256 private MIN_NEXT_BID_PERCENT = 5;
     uint256 private _auctionBlockedAmount;
     uint256 private _auctionFeeAmount;
@@ -105,6 +105,7 @@ contract Auction is
         _;
     }
 
+    receive() external payable {}
    
     constructor() {
         _disableInitializers();
@@ -113,9 +114,12 @@ contract Auction is
 
     
     function initialize(address multisigTimelock) external initializer {
-        __ReentrancyGuard_init();
+        //__ReentrancyGuard_init();
         if (multisigTimelock == address(0)) revert ZeroAddress();
         _multisigTimelock = multisigTimelock;
+        MAX_DURATION = 7 days;
+        MIN_NEXT_BID_PERCENT = 5;
+        auctionCounter = 1;
     }
 
     /**
@@ -134,15 +138,6 @@ contract Auction is
         if (newAuctionFeeAmount > 500) revert InvalidAuctionFeeAmount();
         _auctionFeeAmount = newAuctionFeeAmount;
         emit NewAuctionFeeAmountSet(newAuctionFeeAmount);
-    }
-
-    /**
-     * @dev Set new max duration period
-     */
-    function setMaxDuration(uint256 newMaxDuration) external onlyMultisig {
-        if (newMaxDuration < MIN_DURATION) revert InvalidDuration();
-        MAX_DURATION = newMaxDuration;
-        emit NewMaxDurationSet(newMaxDuration);
     }
 
     /**
@@ -182,7 +177,23 @@ contract Auction is
         emit NewFactoryAddressSet(newFactoryAddress);
     } 
 
+    /**
+     * @dev Set new minimum next bid percent
+     */
+    function setMinimumNextBidPercent(uint256 newBidPercent) external onlyMultisig {
+        if (newBidPercent < 5 || newBidPercent > 50) revert InvalidNextBidPercent();
+        MIN_NEXT_BID_PERCENT = newBidPercent;
+        emit NewNextBidPercentSet(newBidPercent);
+    }
 
+    /**
+     * @dev Set new auction max duration time
+     */
+    function setMaxDuration(uint256 newMaxDuration) external onlyMultisig {
+        if (newMaxDuration < MIN_DURATION) revert InvalidDuration();
+        MAX_DURATION = newMaxDuration;
+        emit NewMaxDurationSet(newMaxDuration);
+    }
     
     /**
      * @dev Put current token on auction
@@ -293,15 +304,6 @@ contract Auction is
         }
         
         emit NewBidSet(auctionId, maxCurrentBid, msg.sender);
-    }
-
-    /**
-     * @dev Set new minimum next bid percent
-     */
-    function setMinimumNextBidPercent(uint256 newBidPercent) external onlyMultisig {
-        if (newBidPercent < 5 || newBidPercent > 50) revert InvalidNextBidPercent();
-        MIN_NEXT_BID_PERCENT = newBidPercent;
-        emit NewNextBidPercentSet(newBidPercent);
     }
 
     /**
@@ -441,33 +443,34 @@ contract Auction is
     }
 
     /**
-     * @dev Get complete auction information
-     * @param auctionId The ID of the auction
-     * @return seller The address of the seller
-     * @return collectionAddress The address of the NFT collection
-     * @return tokenId The token ID being auctioned
-     * @return price The minimum bid price
-     * @return deadline The auction deadline timestamp
-     * @return isFinished Whether the auction is finished
+     * @dev Get total number of auctions created
+     * @return count The total number of auctions (including finished ones)
      */
-    function getAuctionInfo(uint256 auctionId) external view returns (
-        address seller,
-        address collectionAddress,
-        uint256 tokenId,
-        uint256 price,
-        uint256 deadline,
-        bool isFinished
-    ) {
-        if (auctionId >= auctionCounter) revert InvalidAuction();
-        auctionNFT memory auction = _auctionNFTInfo[auctionId];
-        return (
-            auction.seller,
-            auction.collectionAddress,
-            auction.tokenId,
-            auction.price,
-            auction.deadline,
-            _auctionFinished[auctionId]
-        );
+    function getAuctionCount() external view returns (uint256 count) {
+        return auctionCounter - 1;
+    }
+
+    /**
+     * @dev Get factory address
+     */
+    function getFactoryAddress() external view returns (address) {
+        return address(_factoryTyped);
+    }
+
+
+    /**
+     * @dev Get total blocked amount (bids that haven't been withdrawn)
+     * @return amount The total amount of ETH blocked in active bids
+     */
+    function getBlockedAmount() external view returns (uint256 amount) {
+        return _auctionBlockedAmount;
+    }
+
+    /**
+     * @dev Get auction fee receiver address
+     */
+    function getAuctionFeeReceiver() external view returns (address) {
+        return _auctionFeeReceiver;
     }
 
     /**
@@ -526,11 +529,49 @@ contract Auction is
     }
 
     /**
-     * @dev Get total number of auctions created
-     * @return count The total number of auctions (including finished ones)
+     * @dev Get maximum bid on the current auction
      */
-    function getAuctionCount() external view returns (uint256 count) {
-        return auctionCounter - 1;
+    function getMaximumBid(uint256 auctionId) public view returns(uint256 maxCurrentBid, uint256 maxBidIndex) {
+        if (auctionId >= auctionCounter) revert InvalidAuction();
+        if (_auctionFinished[auctionId]) revert AuctionIsExpired();
+        if (_userAuctionBids[auctionId].length == 0) revert NoBidsMade();
+
+        for (uint256 i = 0; i < _userAuctionBids[auctionId].length; ++i) {
+            if (_userAuctionBids[auctionId][i].buyPrice > maxCurrentBid) {
+                maxCurrentBid = _userAuctionBids[auctionId][i].buyPrice;
+                maxBidIndex = i;
+            } 
+        }
+    }
+
+    /**
+     * @dev Get complete auction information
+     * @param auctionId The ID of the auction
+     * @return seller The address of the seller
+     * @return collectionAddress The address of the NFT collection
+     * @return tokenId The token ID being auctioned
+     * @return price The minimum bid price
+     * @return deadline The auction deadline timestamp
+     * @return isFinished Whether the auction is finished
+     */
+    function getAuctionInfo(uint256 auctionId) external view returns (
+        address seller,
+        address collectionAddress,
+        uint256 tokenId,
+        uint256 price,
+        uint256 deadline,
+        bool isFinished
+    ) {
+        if (auctionId >= auctionCounter) revert InvalidAuction();
+        auctionNFT memory auction = _auctionNFTInfo[auctionId];
+        return (
+            auction.seller,
+            auction.collectionAddress,
+            auction.tokenId,
+            auction.price,
+            auction.deadline,
+            _auctionFinished[auctionId]
+        );
     }
 
     /**
@@ -564,14 +605,6 @@ contract Auction is
     }
 
     /**
-     * @dev Get total blocked amount (bids that haven't been withdrawn)
-     * @return amount The total amount of ETH blocked in active bids
-     */
-    function getBlockedAmount() external view returns (uint256 amount) {
-        return _auctionBlockedAmount;
-    }
-
-    /**
      * @dev Implementation of IERC721Receiver to allow marketplace to receive NFTs
      * @notice This is required when minting tokens to the marketplace contract
      */
@@ -584,22 +617,6 @@ contract Auction is
         return IERC721Receiver.onERC721Received.selector;
     }
  
-    /**
-     * @dev Get maximum bid on the current auction
-     */
-    function getMaximumBid(uint256 auctionId) public view returns(uint256 maxCurrentBid, uint256 maxBidIndex) {
-        if (auctionId >= auctionCounter) revert InvalidAuction();
-        if (_auctionFinished[auctionId]) revert AuctionIsExpired();
-        if (_userAuctionBids[auctionId].length == 0) revert NoBidsMade();
-
-        for (uint256 i = 0; i < _userAuctionBids[auctionId].length; ++i) {
-            if (_userAuctionBids[auctionId][i].buyPrice > maxCurrentBid) {
-                maxCurrentBid = _userAuctionBids[auctionId][i].buyPrice;
-                maxBidIndex = i;
-            } 
-        }
-    }
-
     /**
      * @dev Authorized upgrade. Required by UUPSUpgrade
      */

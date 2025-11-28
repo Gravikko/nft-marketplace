@@ -57,11 +57,11 @@ contract MarketplaceNFT is
     }
 
     bool private _isMarketplaceActive;
-    address private _weth;
+    address public _weth;
     address private _multisigTimelock;
     address private _marketplaceFeeReceiver;
     uint256 private _marketplaceFeeAmount;
-    uint256 private constant MIN_PRICE = 1000 wei;
+    uint256 public constant MIN_PRICE = 1000 wei;
     uint256 private constant FEE_DENOMINATOR = 10_000; // Used only for marketplace fee calculation (basis points)
     IFactory private _factoryTyped;
     mapping(bytes32 => bool) private _cancelledOrders;
@@ -77,7 +77,7 @@ contract MarketplaceNFT is
 
     /* Events */
     event MarketplaceIsActive();
-    event MarketplaceIsStopped();
+    event MarketplaceSetStopped();
     event MultisigTimelockSet(address indexed multisigTimelock);
     event NewFactoryAddressSet(address indexed newFactory);
     event NewMarketplaceFeeAmountSet(uint256 indexed feeAmount);
@@ -136,10 +136,10 @@ contract MarketplaceNFT is
     error NonceAlreadyUsed();
     error NotAMultisigTimelock();
     error NotATokenOwner();
-    error OfferCancelled();
+    error OfferIsCancelled();
     error OfferExpired();
     error OfferNotCancellable();
-    error OrderCancelled();
+    error OrderIsCancelled();
     error OrderExpired();
     error OrderNotCancellable();
     error PaymentFailed();
@@ -153,13 +153,19 @@ contract MarketplaceNFT is
         _;
     }
 
+    modifier onlyOperational() {
+        if (!_isMarketplaceActive) revert MarketplaceIsStopped();
+        if (address(_factoryTyped) == address(0)) revert NoFactoryAddressSet();
+        _;
+    }
+
     constructor() {
         _disableInitializers();
     }    
 
     function initialize(address multisigTimelock, address weth) external initializer {
         __EIP712_init("MarketplaceNFT", "1");
-        __ReentrancyGuard_init();
+        //__ReentrancyGuard_init();
         if (multisigTimelock == address(0)) revert ZeroAddress();
         if (weth == address(0)) revert ZeroAddress();
         _multisigTimelock = multisigTimelock;
@@ -170,6 +176,7 @@ contract MarketplaceNFT is
      * @dev Set new MultisigTimelock address
      */
     function setMultisigTimelock(address newMultisigTimelock) external onlyMultisig {
+        if (newMultisigTimelock == address(0)) revert ZeroAddress();
         _multisigTimelock = newMultisigTimelock;
         emit MultisigTimelockSet(newMultisigTimelock);
     }
@@ -207,7 +214,7 @@ contract MarketplaceNFT is
     function stopMarketplace() external onlyMultisig {
         if (!_isMarketplaceActive) revert MarketplaceIsStoppedAlready();
         _isMarketplaceActive = false;
-        emit MarketplaceIsStopped();
+        emit MarketplaceSetStopped();
     }
 
     /**
@@ -220,21 +227,10 @@ contract MarketplaceNFT is
         uint256 price,
         uint256 nonce,
         uint256 deadline
-    ) external returns (Offer memory) {
-        if (!_isMarketplaceActive) revert MarketplaceIsStopped();
-        if (address(_factoryTyped) == address(0)) revert NoFactoryAddressSet();
+    ) external onlyOperational returns (Offer memory) { 
         if (price < MIN_PRICE) revert IncorrectPrice();
 
-        address collectionAddress;
-        try _factoryTyped.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error (string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
-        }
-
-        if (collectionAddress == address(0)) revert InvalidCollectionAddress();
+        address collectionAddress = getCollectionAddress(collectionId);
 
         IERC721Collection collection = IERC721Collection(collectionAddress);
 
@@ -242,8 +238,8 @@ contract MarketplaceNFT is
         if (owner == msg.sender) revert InvalidOfferOperation();
 
         IERC20 weth = IERC20(_weth);
-        if (weth.allowance(msg.sender, address(this)) < price) revert InsufficientPayment();
         if (weth.balanceOf(msg.sender) < price) revert InsufficientPayment();
+        if (weth.allowance(msg.sender, address(this)) < price) revert InsufficientPayment(); 
 
         return Offer({
             buyer: msg.sender,
@@ -263,70 +259,84 @@ contract MarketplaceNFT is
     function executeOffer(
         Offer memory offer,
         bytes memory signature
-    ) external payable nonReentrant {
-        if (!_isMarketplaceActive) revert MarketplaceIsStopped();
-        if (address(_factoryTyped) == address(0)) revert NoFactoryAddressSet();
+    ) external payable nonReentrant onlyOperational {
         if (offer.deadline < block.timestamp) revert OfferExpired();
         if (_usedNoncesOffers[offer.buyer][offer.nonce]) revert NonceAlreadyUsed();
 
-        bytes32 offerHash = keccak256(abi.encodePacked(
-            offer.buyer,
-            offer.collectionId,
-            offer.tokenId,
-            offer.price,
-            offer.nonce,
-            offer.deadline
-        ));
-        if (_cancelledOffers[offerHash]) revert OfferCancelled();
+        {
+            bytes32 offerHash = keccak256(abi.encodePacked(
+                offer.buyer,
+                offer.collectionId,
+                offer.tokenId,
+                offer.price,
+                offer.nonce,
+                offer.deadline
+            ));
+            if (_cancelledOffers[offerHash]) revert OfferIsCancelled();
 
-        bytes32 digest = _hashTypedDataV4(_hashOffer(offer));
-        address signer = ECDSA.recover(digest, signature);
-        if (signer != offer.buyer) revert InvalidSignature();
-
-        IERC20 weth = IERC20(_weth);
-        if (weth.allowance(offer.buyer, address(this)) < offer.price) revert InsufficientPayment();
-        if (weth.balanceOf(offer.buyer) < offer.price) revert InsufficientPayment();
-        if (!weth.transferFrom(offer.buyer, address(this), offer.price)) revert PaymentFailed();
-
-        address collectionAddress;
-        try _factoryTyped.getCollectionAddressById(offer.collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error(string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
+            bytes32 digest = _hashTypedDataV4(_hashOffer(offer));
+            address signer = ECDSA.recover(digest, signature);
+            if (signer != offer.buyer) revert InvalidSignature();
         }
-        if (collectionAddress == address(0)) revert InvalidCollectionAddress();
+
+        address buyer = offer.buyer;
+        uint256 collectionId = offer.collectionId;
+        uint256 tokenId = offer.tokenId;
+        uint256 price = offer.price;
+        uint256 nonce = offer.nonce;
+        uint256 deadline = offer.deadline;
+
+        {
+            IERC20 weth = IERC20(_weth);
+            if (weth.balanceOf(buyer) < price) revert InsufficientPayment();
+            if (weth.allowance(buyer, address(this)) < price) revert InsufficientPayment();
+            if (!weth.transferFrom(buyer, address(this), price)) revert PaymentFailed();
+        }
+
+        address collectionAddress = getCollectionAddress(collectionId);
 
         IERC721Collection collection = IERC721Collection(collectionAddress);
         address seller = msg.sender;
-        if (collection.ownerOf(offer.tokenId) != seller) revert NotATokenOwner();
-
-        (address royaltyReceiver, uint256 royaltyAmount) = IERC2981(collectionAddress).royaltyInfo(offer.tokenId, offer.price);
-        uint256 maxRoyaltyAmount = (offer.price * 1000) / FEE_DENOMINATOR;
-        if (royaltyAmount > maxRoyaltyAmount) {
-            royaltyAmount = maxRoyaltyAmount;
+        
+        // Scope owner check
+        {
+            address owner = collection.ownerOf(tokenId);
+            if (owner != seller) revert NotATokenOwner();
         }
 
-        uint256 marketplaceFeeAmount = (offer.price * _marketplaceFeeAmount) / FEE_DENOMINATOR;
-        uint256 sellerProceeds = offer.price - royaltyAmount - marketplaceFeeAmount;
+        // Calculate fees in scoped block
+        address royaltyReceiver;
+        uint256 royaltyAmount;
+        uint256 marketplaceFeeAmount;
+        uint256 sellerProceeds;
+        {
+            (royaltyReceiver, royaltyAmount) = IERC2981(collectionAddress).royaltyInfo(tokenId, price);
+            uint256 maxRoyaltyAmount = (price * 1000) / FEE_DENOMINATOR;
+            if (royaltyAmount > maxRoyaltyAmount) {
+                royaltyAmount = maxRoyaltyAmount;
+            }
+            marketplaceFeeAmount = (price * _marketplaceFeeAmount) / FEE_DENOMINATOR;
+            sellerProceeds = price - royaltyAmount - marketplaceFeeAmount;
+        }
 
-        _usedNoncesOffers[offer.buyer][offer.nonce] = true;
-        collection.safeTransferFrom(seller, offer.buyer, offer.tokenId);
+        _usedNoncesOffers[buyer][nonce] = true;
+        collection.safeTransferFrom(seller, buyer, tokenId);
 
+        // Execute payments in scoped blocks
+        IERC20 weth = IERC20(_weth);
         if (sellerProceeds > 0 && !weth.transfer(seller, sellerProceeds)) revert PaymentFailed();
         if (royaltyReceiver != address(0) && royaltyAmount > 0 && !weth.transfer(royaltyReceiver, royaltyAmount)) revert PaymentFailed();
         if (_marketplaceFeeReceiver != address(0) && marketplaceFeeAmount > 0 && !weth.transfer(_marketplaceFeeReceiver, marketplaceFeeAmount)) revert PaymentFailed();
 
-        emit NonceMarkedUsed(offer.buyer, offer.nonce);
+        emit NonceMarkedUsed(buyer, nonce);
         emit OfferExecuted(
-            offer.buyer,
+            buyer,
             seller,
-            offer.collectionId,
-            offer.tokenId,
-            offer.price,
-            offer.nonce,
-            offer.deadline
+            collectionId,
+            tokenId,
+            price,
+            nonce,
+            deadline
         );
     }
 
@@ -370,75 +380,72 @@ contract MarketplaceNFT is
      * @dev Execute order - THIS is the transaction users call
      * @notice Buyer calls this with signed order to purchase NFT
      */
-    function executeOrder(
+     function executeOrder(
         Order memory order,
         bytes memory signature
-    ) external payable nonReentrant {
-        if (!_isMarketplaceActive) revert MarketplaceIsStopped();
-        if (address(_factoryTyped) == address(0)) revert NoFactoryAddressSet();
+    ) external payable nonReentrant onlyOperational {
         if (msg.value < order.price) revert InsufficientPayment();
         if (order.deadline < block.timestamp) revert OrderExpired();
         if (_usedNoncesOrders[order.seller][order.nonce]) revert NonceAlreadyUsed();
 
-        bytes32 orderHash = keccak256(abi.encodePacked(
-            order.seller,
-            order.collectionId,
-            order.tokenId,
-            order.price,
-            order.nonce,
-            order.deadline
-        ));
-        if (_cancelledOrders[orderHash]) revert OrderCancelled();
+        // Scope validation variables
+        {
+            bytes32 orderHash = keccak256(abi.encodePacked(
+                order.seller,
+                order.collectionId,
+                order.tokenId,
+                order.price,
+                order.nonce,
+                order.deadline
+            ));
+            if (_cancelledOrders[orderHash]) revert OrderIsCancelled();
 
-        bytes32 structHash = keccak256(abi.encode(
-            ORDER_TYPEHASH,
-            order.seller,
-            order.collectionId,
-            order.tokenId,
-            order.price,
-            order.nonce,
-            order.deadline
-        ));
-        bytes32 hash = _hashTypedDataV4(structHash);
-        address signer = ECDSA.recover(hash, signature);
-        if (signer != order.seller) revert InvalidSignature();
-
-        address collectionAddress;
-        try _factoryTyped.getCollectionAddressById(order.collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error(string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
+            bytes32 structHash = keccak256(abi.encode(
+                ORDER_TYPEHASH,
+                order.seller,
+                order.collectionId,
+                order.tokenId,
+                order.price,
+                order.nonce,
+                order.deadline
+            ));
+            bytes32 hash = _hashTypedDataV4(structHash);
+            address signer = ECDSA.recover(hash, signature);
+            if (signer != order.seller) revert InvalidSignature();
         }
+
+        address collectionAddress = getCollectionAddress(order.collectionId);
 
         IERC721Collection collection = IERC721Collection(collectionAddress);
 
-        address owner = collection.ownerOf(order.tokenId);
-        if (owner != order.seller) revert NotATokenOwner();
-        if (!collection.isTokenApproved(order.tokenId, address(this))) {
-            revert MarketplaceHasNoApprovalForSale();
+        // Scope owner check
+        {
+            address owner = collection.ownerOf(order.tokenId);
+            if (owner != order.seller) revert NotATokenOwner();
+            if (!collection.isTokenApproved(order.tokenId, address(this))) {
+                revert MarketplaceHasNoApprovalForSale();
+            }
         }
 
         _usedNoncesOrders[order.seller][order.nonce] = true;
-
         collection.safeTransferFrom(order.seller, msg.sender, order.tokenId);
 
-        // Use ERC-2981 to compute royalty in wei, then cap to 10%
-        (address royaltyReceiver, uint256 royaltyAmount) = IERC2981(collectionAddress).royaltyInfo(order.tokenId, order.price);
-        uint256 maxRoyaltyAmount = (order.price * 1000) / FEE_DENOMINATOR; 
-        if (royaltyAmount > maxRoyaltyAmount) {
-            royaltyAmount = maxRoyaltyAmount;
+        // Calculate fees and payments in scoped block
+        address royaltyReceiver;
+        uint256 royaltyAmount;
+        uint256 marketplaceFeeAmount;
+        uint256 sellerProceeds;
+
+        {
+            (royaltyReceiver, royaltyAmount, marketplaceFeeAmount) = getAllRoyaltyAndFeeInfo(collectionAddress, order.tokenId, order.price);
+            sellerProceeds = order.price - royaltyAmount - marketplaceFeeAmount;
         }
-        uint256 marketplaceFeeAmount = (order.price * _marketplaceFeeAmount) / FEE_DENOMINATOR;
 
-        uint256 sellerProceeds = order.price - royaltyAmount - marketplaceFeeAmount;
-        
-        // Collect marketplace fee (stays in contract, can be withdrawn by owner)
-        // Marketplace fee is already deducted from sellerProceeds above
-
-        (bool successSeller, ) = payable(order.seller).call{value: sellerProceeds}("");
-        if (!successSeller) revert PaymentFailed();
+        // Execute payments in scoped blocks
+        {
+            (bool successSeller, ) = payable(order.seller).call{value: sellerProceeds}("");
+            if (!successSeller) revert PaymentFailed();
+        }
 
         if (royaltyReceiver != address(0) && royaltyAmount > 0) {
             (bool successRoyaltyReceiver, ) = payable(royaltyReceiver).call{value: royaltyAmount}("");
@@ -450,10 +457,12 @@ contract MarketplaceNFT is
             if (!successMarketplaceFeeReceiver) revert PaymentFailed();
         }
 
-        uint256 refund = msg.value - order.price;
-        if (refund > 0) {
-            (bool successRefund, ) = payable(msg.sender).call{value: refund}("");
-            if (!successRefund) revert PaymentFailed();
+        {
+            uint256 refund = msg.value - order.price;
+            if (refund > 0) {
+                (bool successRefund, ) = payable(msg.sender).call{value: refund}("");
+                if (!successRefund) revert PaymentFailed();
+            }
         }
 
         emit OrderExecuted(order.seller, msg.sender, order.collectionId, order.tokenId, order.price);
@@ -509,18 +518,9 @@ contract MarketplaceNFT is
      * @dev Buy unminted token from collection
      * @notice Buyer pays mintPrice and receives a newly minted token
      */
-    function buyUnmintedToken(uint256 collectionId) external payable {
-        if (!_isMarketplaceActive) revert MarketplaceIsStopped();
-        if (address(_factoryTyped) == address(0)) revert NoFactoryAddressSet();
+    function buyUnmintedToken(uint256 collectionId) external payable onlyOperational {
 
-        address collectionAddress;
-        try _factoryTyped.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error(string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
-        }
+        address collectionAddress = getCollectionAddress(collectionId);
 
         IERC721Collection collection = IERC721Collection(collectionAddress);
         if (collection.remainingSupply() == 0) revert NoUnmintedTokens();
@@ -571,45 +571,23 @@ contract MarketplaceNFT is
      * @dev Put token on the sale
      */
     function putTokenOnSale(
-        address seller, 
-        uint256 collectionId, 
-        uint256 tokenId,
-        uint256 price,
-        uint256 nonce,
-        uint256 deadline
-    ) external view returns (Order memory order) {
-        if (!_isMarketplaceActive) revert MarketplaceIsStopped();
-        if (address(_factoryTyped) == address(0)) revert NoFactoryAddressSet();
-        if (price < MIN_PRICE) revert IncorrectPrice();
-        if (deadline <= block.timestamp) revert OrderExpired();
-        address collectionAddress;
-        try _factoryTyped.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error(string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
-        }
+        Order memory order
+    ) external view onlyOperational {
+        if (order.price < MIN_PRICE) revert IncorrectPrice();
+        if (order.deadline <= block.timestamp) revert OrderExpired();
+        if (order.seller != msg.sender) revert NotATokenOwner();
 
+        address collectionAddress = getCollectionAddress(order.collectionId);
 
         IERC721Collection collection = IERC721Collection(collectionAddress);
 
-        address owner = collection.ownerOf(tokenId);
-        if (owner != seller) revert NotATokenOwner();
+        address owner = collection.ownerOf(order.tokenId);
+        if (owner != msg.sender) revert NotATokenOwner();
 
 
-        if (!collection.isTokenApproved(tokenId, address(this))) {
+        if (!collection.isTokenApproved(order.tokenId, address(this))) {
             revert MarketplaceHasNoApprovalForSale();
         }
-
-        return Order({
-            seller: seller,
-            collectionId: collectionId,
-            tokenId: tokenId,
-            price: price,
-            nonce: nonce,
-            deadline: deadline
-        });
     }
 
     /**
@@ -627,6 +605,32 @@ contract MarketplaceNFT is
      */
     function isMarketplaceActive() external view returns (bool) {
         return _isMarketplaceActive;
+    }
+
+    /**
+     * @dev Get the royalty, marketplace fee amount and royalty receiver
+     */
+    function getAllRoyaltyAndFeeInfo(address collectionAddress, uint256 tokenId, uint256 price) public view returns (address royaltyReceiver, uint256 royaltyAmount, uint256 marketplaceFeeAmount) {
+        (royaltyReceiver, royaltyAmount) = IERC2981(collectionAddress).royaltyInfo(tokenId, price);
+        uint256 maxRoyaltyAmount = (price * 1000) / FEE_DENOMINATOR; 
+        if (royaltyAmount > maxRoyaltyAmount) {
+            royaltyAmount = maxRoyaltyAmount;
+        }
+        marketplaceFeeAmount = (price * _marketplaceFeeAmount) / FEE_DENOMINATOR;
+    }
+
+    /**
+     * @dev Check and return if the collection exists
+     */
+    function getCollectionAddress(uint256 collectionId) public view returns(address collectionAddress) {
+        try _factoryTyped.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
+            collectionAddress = _collectionAddress;
+        } catch Error (string memory reason) {
+            revert(string.concat("Factory revert: ", reason));
+        } catch (bytes memory) {
+            revert("Factory call failed");
+        }
+        if (collectionAddress == address(0)) revert InvalidCollectionAddress();
     }
 
     /**
@@ -703,6 +707,20 @@ contract MarketplaceNFT is
      */
     function getDomainSeparator() external view returns (bytes32) {
         return _domainSeparatorV4();
+    }
+
+    /**
+     * @dev Get the marketplace fee receiver address
+     */
+    function getMarketplaceFeeReceiver() external view returns(address) {
+        return _marketplaceFeeReceiver;
+    }
+
+    /**
+     * @dev Get the marketplace fee amount
+     */
+    function getMarketplaceFeeAmount() external view returns(uint256) {
+        return _marketplaceFeeAmount;
     }
 
     /**

@@ -83,6 +83,22 @@ contract MultisigTimelock is
     constructor() {
         _disableInitializers();
     }    
+
+    /**
+     * @dev External initializer for proxy deployments.
+     *      Must be called exactly once on the proxy after deployment.
+     */
+    function initialize(
+        address[] memory owners,
+        uint256 minApprovals,
+        uint256 maxDelay
+    ) external initializer {
+        // Initialize UUPSUpgradeable internals
+        //__UUPSUpgradeable_init();
+
+        // Initialize multisig-specific state
+        __MultisigTimelock_init(owners, minApprovals, maxDelay);
+    }
     
     /**
      * @dev Adds to queue new Tx
@@ -106,7 +122,7 @@ contract MultisigTimelock is
             _timestamp
         ));
 
-        if(_queue[txHash]) revert AlreadyQueued();
+        if (_queue[txHash]) revert AlreadyQueued();
 
         _queue[txHash] = true;
         
@@ -299,7 +315,7 @@ contract MultisigTimelock is
      * @dev Get transaction details
      * @param _txId The transaction ID
      */
-    function getTransactions(bytes32 _txId) external view returns(QueuedTransaction memory transaction) {
+    function getTransactionDetails(bytes32 _txId) external view returns(QueuedTransaction memory transaction) {
         transaction = _queuedTransactions[_txId];
     }
 
@@ -360,7 +376,7 @@ contract MultisigTimelock is
      * @dev Initialize the multisig timelock
      * @param owners Array of initial owners
      * @param minApprovals Minimum number for approvals required
-     * @param maxDelay Maximum number before execution is possible
+     * @param maxDelay Maximum time amount before execution is possible
      */
     function __MultisigTimelock_init(
         address[] memory owners,

@@ -76,15 +76,27 @@ contract StakingNFT is
         _;
     }
 
+    modifier isActive() {
+        if (!_isStakingActive) revert StakingAlreadyStopped();
+        if (address(_factory) == address(0)) revert NoFactoryAddress();
+        _;
+    }
+
     constructor() {
         _disableInitializers();
-    }   
+    }  
+
+    
+    function initialize(address multisigTimelock) external initializer {
+        if (multisigTimelock == address(0)) revert ZeroAddress();
+        _multisigTimelock = multisigTimelock;
+        _isStakingActive = false;
+    } 
 
     /**
      * @dev Stop staking contract
      */
-    function stopStaking() external onlyMultisig {
-        if (!_isStakingActive) revert StakingAlreadyStopped();
+    function stopStaking() external onlyMultisig isActive {
         _isStakingActive = false;
         emit StakingIsStopped();
     }
@@ -93,11 +105,11 @@ contract StakingNFT is
      * @dev Activate staking contract
      */
     function activateStaking() external onlyMultisig {
+        if (address(_factory) == address(0)) revert NoFactoryAddress();
         if (_isStakingActive) revert StakingAlreadyActive();
         _isStakingActive = true;
         emit StakingIsActive();
     }
-
 
     /**
      * @dev Sets new multisigTimelock address
@@ -108,13 +120,6 @@ contract StakingNFT is
         emit NewMultisigTimelockSet(multisigTimelock);
     } 
      
-    function initialize(address multisigTimelock, address factory) external initializer {
-        if (multisigTimelock == address(0)) revert ZeroAddress();
-        if (factory == address(0)) revert ZeroAddress();
-        _multisigTimelock = multisigTimelock;
-        _factory = IFactory(factory);
-        _isStakingActive = false;
-    }
 
     function setFactoryAddress(address newFactoryAddress) external onlyMultisig {
         if (newFactoryAddress == address(0)) revert ZeroAddress();
@@ -128,25 +133,15 @@ contract StakingNFT is
      * @param collectionId The ID of the collection
      * @param tokenId The ID of the token to stake
      */
-    function stake(uint256 collectionId, uint256 tokenId) external {
-        if (!_isStakingActive) revert StakingIsNotActive();
-        if (address(_factory) == address(0)) revert NoFactoryAddress();
+    function stake(uint256 collectionId, uint256 tokenId) external isActive {
 
-        address collectionAddress;
-        try _factory.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error (string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
-        }
-
-        if (collectionAddress == address(0)) revert InvalidCollectionAddress();
+        address collectionAddress = getCollectionAddress(collectionId);
 
         IERC721Collection collection = IERC721Collection(collectionAddress);
+        if (_stakedNFT[collectionAddress][tokenId] != address(0)) revert NFTAlreadyStaked();
+
         if (collection.ownerOf(tokenId) != msg.sender) revert NotNFTOwner();
 
-        if (_stakedNFT[collectionAddress][tokenId] != address(0)) revert NFTAlreadyStaked();
 
         if (!collection.isTokenApproved(tokenId, address(this))) revert NoApprovedForStakingContract();
 
@@ -170,20 +165,10 @@ contract StakingNFT is
      * @param collectionId The ID of the collection
      * @param tokenId The ID of the token to stake
      */
-    function unstakeNFT(uint256 collectionId, uint256 tokenId) external {
-        if (!_isStakingActive) revert StakingIsNotActive();
+    function unstakeNFT(uint256 collectionId, uint256 tokenId) external isActive {
         if (address(_factory) == address(0)) revert NoFactoryAddress();
 
-        address collectionAddress;
-        try _factory.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error (string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
-        }
-
-        if (collectionAddress == address(0)) revert InvalidCollectionAddress();
+        address collectionAddress = getCollectionAddress(collectionId);
 
         if (_stakedNFT[collectionAddress][tokenId] != msg.sender) revert NFTNotStakedByUser();
 
@@ -240,18 +225,8 @@ contract StakingNFT is
      * @return The address of the staker, or address(0) if not staked
      */
     function getStaker(uint256 collectionId, uint256 tokenId) external view returns(address) {
-        if (address(_factory) == address(0)) revert NoFactoryAddress();
 
-        address collectionAddress;
-        try _factory.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error (string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
-        }
-
-        if (collectionAddress == address(0)) revert InvalidCollectionAddress();
+        address collectionAddress = getCollectionAddress(collectionId);
 
         return _stakedNFT[collectionAddress][tokenId];
     }
@@ -264,18 +239,8 @@ contract StakingNFT is
      * @return True if the user has staked the NFT, false otherwise
      */
     function checkUserStakeNFT(address user, uint256 collectionId, uint256 tokenId) external view returns (bool) {
-        if (address(_factory) == address(0)) revert NoFactoryAddress();
 
-        address collectionAddress;
-        try _factory.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error (string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
-        }
-
-        if (collectionAddress == address(0)) revert InvalidCollectionAddress();
+        address collectionAddress = getCollectionAddress(collectionId);
 
         return _userStakedNFT[user][collectionAddress][tokenId];
     }
@@ -287,22 +252,11 @@ contract StakingNFT is
      * @return Array of staked token IDs
      */
     function getUserTokenStaked(address user, uint256 collectionId) external view returns(uint256[] memory) {
-        if (address(_factory) == address(0)) revert NoFactoryAddress();
 
-        address collectionAddress;
-        try _factory.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
-            collectionAddress = _collectionAddress;
-        } catch Error (string memory reason) {
-            revert(string.concat("Factory revert: ", reason));
-        } catch (bytes memory) {
-            revert("Factory call failed");
-        }
-
-        if (collectionAddress == address(0)) revert InvalidCollectionAddress();
+        address collectionAddress = getCollectionAddress(collectionId);
 
         return _userStakedTokens[user][collectionAddress];
     }
-
 
     /**
      * @dev Check if staking is active
@@ -311,6 +265,26 @@ contract StakingNFT is
         return _isStakingActive;
     }
 
+    /**
+     * @dev Get the factory address
+     */
+    function getFactoryAddress() external view returns (address) {
+        return address(_factory);
+    }
+
+    /**
+     * @dev Check and return if the collection exists
+     */
+    function getCollectionAddress(uint256 collectionId) public view returns(address collectionAddress) {
+        try _factory.getCollectionAddressById(collectionId) returns (address _collectionAddress) {
+            collectionAddress = _collectionAddress;
+        } catch Error (string memory reason) {
+            revert(string.concat("Factory revert: ", reason));
+        } catch (bytes memory) {
+            revert("Factory call failed");
+        }
+        if (collectionAddress == address(0)) revert InvalidCollectionAddress();
+    }
 
     /**
      * @dev Implementation of IERC721Receiver to allow contract to receive NFTs
@@ -333,7 +307,22 @@ contract StakingNFT is
         return _rewardAmount;
     }
 
+    /**
+     * @dev Get timestamp when token was staked
+     */
+    function getStakedTimestamp(uint256 collectionId, uint256 tokenId) public view returns(uint256) {
 
+        address collectionAddress = getCollectionAddress(collectionId);
+
+        return _stakedTimestamp[collectionAddress][tokenId];
+    } 
+
+    /**
+     * @dev Return address who staked current nft
+     */
+    function getUserStakedNFT(address user, address collectionAddress, uint256 tokenId) public view returns (bool) {
+        return _userStakedNFT[user][collectionAddress][tokenId];
+    }
 
     /**
      * @dev Authorized upgrade. Required by UUPSUpgradeable
