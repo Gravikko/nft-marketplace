@@ -1,0 +1,9 @@
+// Deployed contract addresses (Sepolia testnet)
+export const ADDRESSES = {
+  factory: "0x22E9780B0263cC6e1E3611F67F3607e34b8D4f55",
+  marketplace: "0xd6A742Fb016a3850414f9bffdE1e14873882cC48",
+  auction: "0x79F2eB96AD7a5859007565B23B7CBB9c1217Be40",
+  staking: "0xF7124375476191009F3C1ca7088C16a7cd91E442",
+  beacon: "0xf74325F78eE5d80803bDf749957d6AB9A25fD005",
+  swapAdapter: "0x81cbB00e5F4B5f3846c18eE9F71E11a7050AaB2C",
+} as const;
